@@ -1,0 +1,21 @@
+# Maven
+target/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Logs
+logs/
+
+# Dataset (too large for git — download separately from IAM website)
+data/raw/
+
+# Trained model checkpoints
+models/
+
+# OS
+.DS_Store
+Thumbs.db
