@@ -8,6 +8,7 @@ import org.deeplearning4j.util.ModelSerializer;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.dataset.MultiDataSet;
 import org.nd4j.linalg.factory.Nd4j;
+import org.nd4j.linalg.indexing.NDArrayIndex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -17,7 +18,7 @@ import java.nio.file.*;
 import java.util.*;
 
 /**
- * Trains the CNN + BiLSTM model on the IAM word dataset using DL4J.
+ * Trains the CNN + LSTM model on the IAM word dataset using DL4J.
  *
  * Loss: multi-class cross-entropy with "stretched" labels.
  * Each word's characters are linearly distributed across TIME_STEPS time
@@ -27,11 +28,14 @@ import java.util.*;
 public class ModelTrainer {
 
     private static final Logger log = LoggerFactory.getLogger(ModelTrainer.class);
-    private static final int TIME_STEPS = ModelGraph.TIME_STEPS; // IMG_WIDTH / 16 = 8
+    private static final int TIME_STEPS = ModelGraph.TIME_STEPS; // 8
 
     private final IAMDataLoader     dataLoader     = new IAMDataLoader();
     private final ImagePreprocessor preprocessor   = new ImagePreprocessor();
     private final CharsetEncoder    charsetEncoder = new CharsetEncoder();
+
+    /** All preprocessed images cached as flat float[] to eliminate per-batch disk I/O. */
+    private final Map<String, float[]> imageCache = new HashMap<>();
 
     // ── Entry point ───────────────────────────────────────────────────────────
 
@@ -41,10 +45,10 @@ public class ModelTrainer {
 
         DatasetSplit split = loadDataset();
         log.info("Dataset: {}", split);
+        preloadImages(split);
 
-        ComputationGraph model = ModelGraph.build();
-        model.init();
-        log.info("Model initialised  ({} parameters)", model.numParams());
+        ComputationGraph model = loadOrBuild();
+        log.info("Model ready  ({} parameters)", model.numParams());
 
         double bestValLoss = Double.MAX_VALUE;
 
@@ -52,8 +56,8 @@ public class ModelTrainer {
             double trainLoss = runEpoch(model, split.getTrainSamples(), true);
             double valLoss   = runEpoch(model, split.getValSamples(),   false);
 
-            log.info("Epoch [{}/{}]  train_loss={:.4f}  val_loss={:.4f}",
-                    epoch, ModelConfig.EPOCHS, trainLoss, valLoss);
+            log.info("Epoch [{}/{}]  train_loss={}  val_loss={}", epoch, ModelConfig.EPOCHS,
+                    String.format("%.4f", trainLoss), String.format("%.4f", valLoss));
 
             if (valLoss < bestValLoss) {
                 bestValLoss = valLoss;
@@ -61,7 +65,7 @@ public class ModelTrainer {
             }
         }
 
-        log.info("=== Training complete.  Best val_loss={:.4f} ===", bestValLoss);
+        log.info("=== Training complete.  Best val_loss={} ===", String.format("%.4f", bestValLoss));
     }
 
     // ── Dataset ───────────────────────────────────────────────────────────────
@@ -84,6 +88,38 @@ public class ModelTrainer {
         return dataLoader.splitRandom(all, 42L);
     }
 
+    // ── Image cache ───────────────────────────────────────────────────────────
+
+    /**
+     * Pre-loads every image in the dataset into RAM as flat float[] arrays.
+     * This eliminates per-batch disk I/O and is the primary fix for low GPU
+     * utilisation — the GPU was starved waiting for the CPU to read files.
+     */
+    private void preloadImages(DatasetSplit split) {
+        List<IAMSample> all = new java.util.ArrayList<>(split.getTrainSamples());
+        all.addAll(split.getValSamples());
+
+        log.info("Pre-loading {} images into RAM cache...", all.size());
+        int loaded = 0;
+        int failed = 0;
+        for (IAMSample sample : all) {
+            String path = sample.getImagePath();
+            if (imageCache.containsKey(path)) continue;
+            try {
+                float[][] img = preprocessor.preprocessFromPath(path);
+                imageCache.put(path, ImagePreprocessor.flatten(img));
+                loaded++;
+                if (loaded % 5000 == 0) {
+                    log.info("  cached {}/{} images", loaded, all.size());
+                }
+            } catch (Exception e) {
+                failed++;
+                log.debug("Could not preload {}: {}", path, e.getMessage());
+            }
+        }
+        log.info("Image cache ready: {} loaded, {} skipped/failed", loaded, failed);
+    }
+
     // ── Training loop ─────────────────────────────────────────────────────────
 
     private double runEpoch(ComputationGraph model, List<IAMSample> samples, boolean isTraining) {
@@ -102,8 +138,8 @@ public class ModelTrainer {
                 totalLoss += loss;
                 batchCount++;
                 if (batchCount % 100 == 0) {
-                    log.info("  batch {}/{}  avg_loss={:.4f}",
-                            batchCount, totalBatches, totalLoss / batchCount);
+                    log.info("  batch {}/{}  avg_loss={}", batchCount, totalBatches,
+                            String.format("%.4f", totalLoss / batchCount));
                 }
             } catch (Exception e) {
                 log.warn("Skipping batch at index {}: {}", start, e.getMessage());
@@ -120,21 +156,23 @@ public class ModelTrainer {
         // features: [B, 1, H, W]  (NCHW — CNN input)
         INDArray features = Nd4j.zeros(B, 1, ModelConfig.IMG_HEIGHT, ModelConfig.IMG_WIDTH);
 
-        // labels: [B, NUM_CLASSES, TIME_STEPS]  (one-hot per time step — RnnOutputLayer)
+        // labels: [B, NUM_CLASSES, TIME_STEPS]  (one-hot per time step)
         INDArray labels = Nd4j.zeros(B, ModelConfig.NUM_CLASSES, TIME_STEPS);
 
         for (int b = 0; b < B; b++) {
             IAMSample sample = batch.get(b);
 
-            // Load and preprocess image → float[32][128]
-            float[][] img = preprocessor.preprocessFromPath(sample.getImagePath());
-            for (int y = 0; y < ModelConfig.IMG_HEIGHT; y++) {
-                for (int x = 0; x < ModelConfig.IMG_WIDTH; x++) {
-                    features.putScalar(new int[]{b, 0, y, x}, img[y][x]);
-                }
+            // Use cached flat array; fall back to disk if not cached.
+            float[] flat = imageCache.get(sample.getImagePath());
+            if (flat == null) {
+                float[][] img = preprocessor.preprocessFromPath(sample.getImagePath());
+                flat = ImagePreprocessor.flatten(img);
             }
+            // Assign the whole [H×W] slice in one call — much faster than putScalar loops.
+            features.get(NDArrayIndex.point(b), NDArrayIndex.point(0),
+                         NDArrayIndex.all(), NDArrayIndex.all())
+                    .assign(Nd4j.create(flat, new int[]{ModelConfig.IMG_HEIGHT, ModelConfig.IMG_WIDTH}));
 
-            // Encode transcription and stretch across TIME_STEPS
             int[] encoded = charsetEncoder.encode(sample.getTranscription());
             for (int t = 0; t < TIME_STEPS; t++) {
                 int charIdx  = encoded.length > 0
@@ -155,6 +193,26 @@ public class ModelTrainer {
         } else {
             return model.score(mds);
         }
+    }
+
+    // ── Load or build ─────────────────────────────────────────────────────────
+
+    private ComputationGraph loadOrBuild() {
+        File saveFile = new File(ModelConfig.MODEL_SAVE_DIR);
+        if (saveFile.exists()) {
+            try {
+                log.info("Resuming from existing model: {}", ModelConfig.MODEL_SAVE_DIR);
+                ComputationGraph model = ModelSerializer.restoreComputationGraph(saveFile, true);
+                log.info("Loaded model with {} parameters", model.numParams());
+                return model;
+            } catch (IOException e) {
+                log.warn("Could not load existing model ({}), starting fresh", e.getMessage());
+            }
+        }
+        log.info("No saved model found — initialising new model");
+        ComputationGraph model = ModelGraph.build();
+        model.init();
+        return model;
     }
 
     // ── Save ──────────────────────────────────────────────────────────────────

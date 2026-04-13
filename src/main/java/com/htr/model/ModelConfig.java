@@ -31,7 +31,7 @@ public class ModelConfig {
     public static final int BLANK_INDEX = NUM_CLASSES - 1;
 
     // ── Training ──────────────────────────────────────────────────────────────
-    public static final int    BATCH_SIZE    = 32;
+    public static final int    BATCH_SIZE    = 128;
     public static final int    EPOCHS        = 50;
     public static final double LEARNING_RATE = 1e-4;
 

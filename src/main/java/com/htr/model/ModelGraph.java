@@ -1,12 +1,12 @@
 package com.htr.model;
 
 import org.deeplearning4j.nn.conf.ComputationGraphConfiguration;
+import org.deeplearning4j.nn.conf.GradientNormalization;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
-import org.deeplearning4j.nn.conf.inputs.InputType;
+import org.deeplearning4j.nn.conf.graph.ReshapeVertex;
 import org.deeplearning4j.nn.conf.layers.ConvolutionLayer;
 import org.deeplearning4j.nn.conf.layers.RnnOutputLayer;
 import org.deeplearning4j.nn.conf.layers.SubsamplingLayer;
-import org.deeplearning4j.nn.conf.layers.recurrent.Bidirectional;
 import org.deeplearning4j.nn.conf.layers.LSTM;
 import org.deeplearning4j.nn.graph.ComputationGraph;
 import org.deeplearning4j.nn.weights.WeightInit;
@@ -15,87 +15,119 @@ import org.nd4j.linalg.learning.config.Adam;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
 
 /**
- * Builds the shared CNN + BiLSTM model architecture used by both
- * ModelTrainer (training) and HTRModel (inference).
+ * Builds the CNN + LSTM model as a ComputationGraph.
  *
  * Architecture:
- *   Input  [B, 1, 32, 128]  (NCHW)
- *   → 5 CNN blocks           → [B, 256, 2, 8]
- *   → CnnToRnn (auto)        → [B, 512, 8]  (features=512, time=8)
- *   → BiLSTM × 2             → [B, 512, 8]
- *   → Softmax output         → [B, NUM_CLASSES, 8]
+ *   Input  [B, 1, 32, 128]    (NCHW)
+ *   → 5 CNN blocks             → [B, 256, 2, 8]
+ *   → ReshapeVertex (C-order)  → [B, 512, 8]   channels×height collapsed into features,
+ *                                               width preserved as time steps
+ *   → LSTM × 2                 → [B, 256, 8]
+ *   → Softmax output           → [B, NUM_CLASSES, 8]
+ *
+ * ReshapeVertex is a primitive Nd4j reshape — no semantic preprocessing logic.
+ * A C-order reshape of [B, C, H, W] → [B, C*H, W] correctly maps each CNN
+ * column (width position) to one time step, equivalent to CnnToRnnPreProcessor
+ * but without that class's DL4J 1.0.0-M2.1 bug that collapses time steps to 1.
+ *
+ * setInputTypes() is intentionally omitted: it runs after the builder and
+ * silently overwrites manually configured vertices / preprocessors. All nIn
+ * values are set explicitly so DL4J needs no inference.
  */
 public class ModelGraph {
 
-    /** Number of time steps after CNN downsampling (IMG_WIDTH / 16). */
+    /** Width columns kept as time steps after 4× stride-2 pool (128 / 16 = 8). */
     public static final int TIME_STEPS = ModelConfig.IMG_WIDTH / 16; // 8
+
+    // CNN output after pool5: [B, 256, 2, 8]
+    private static final int CNN_OUT_HEIGHT   = ModelConfig.IMG_HEIGHT / 16; // 2
+    private static final int CNN_OUT_CHANNELS = ModelConfig.CNN_FILTERS[4];  // 256
+
+    /** Feature size per time step after ReshapeVertex: channels × height. */
+    public static final int RNN_INPUT_SIZE = CNN_OUT_CHANNELS * CNN_OUT_HEIGHT; // 512
 
     private ModelGraph() {}
 
-    /**
-     * Build and return an uninitialised ComputationGraph ready for
-     * {@code model.init()} or {@code ModelSerializer.restoreComputationGraph()}.
-     */
     public static ComputationGraph build() {
         ComputationGraphConfiguration conf = new NeuralNetConfiguration.Builder()
                 .seed(42)
                 .updater(new Adam(ModelConfig.LEARNING_RATE))
                 .weightInit(WeightInit.XAVIER)
+                // Clip gradients so LSTM weights can't explode.
+                // ClipElementWiseAbsoluteValue caps each gradient value at ±1.0,
+                // which is the standard fix for RNN gradient explosion.
+                .gradientNormalization(GradientNormalization.ClipElementWiseAbsoluteValue)
+                .gradientNormalizationThreshold(1.0)
                 .graphBuilder()
                 .addInputs("input")
 
                 // ── CNN Block 1: [B,1,32,128] → pool → [B,32,16,64] ──────────
                 .addLayer("conv1", new ConvolutionLayer.Builder(3, 3)
-                        .nOut(32).padding(1, 1).activation(Activation.RELU).build(), "input")
+                        .nIn(ModelConfig.IMG_CHANNELS).nOut(32)
+                        .padding(1, 1).activation(Activation.RELU).build(), "input")
                 .addLayer("pool1", new SubsamplingLayer.Builder(SubsamplingLayer.PoolingType.MAX)
                         .kernelSize(2, 2).stride(2, 2).build(), "conv1")
 
                 // ── CNN Block 2: → pool → [B,64,8,32] ────────────────────────
                 .addLayer("conv2", new ConvolutionLayer.Builder(3, 3)
-                        .nOut(64).padding(1, 1).activation(Activation.RELU).build(), "pool1")
+                        .nIn(32).nOut(64)
+                        .padding(1, 1).activation(Activation.RELU).build(), "pool1")
                 .addLayer("pool2", new SubsamplingLayer.Builder(SubsamplingLayer.PoolingType.MAX)
                         .kernelSize(2, 2).stride(2, 2).build(), "conv2")
 
                 // ── CNN Block 3: → pool → [B,128,4,16] ───────────────────────
                 .addLayer("conv3", new ConvolutionLayer.Builder(3, 3)
-                        .nOut(128).padding(1, 1).activation(Activation.RELU).build(), "pool2")
+                        .nIn(64).nOut(128)
+                        .padding(1, 1).activation(Activation.RELU).build(), "pool2")
                 .addLayer("pool3", new SubsamplingLayer.Builder(SubsamplingLayer.PoolingType.MAX)
                         .kernelSize(2, 2).stride(2, 2).build(), "conv3")
 
                 // ── CNN Block 4: no pool → [B,128,4,16] ──────────────────────
                 .addLayer("conv4", new ConvolutionLayer.Builder(3, 3)
-                        .nOut(128).padding(1, 1).activation(Activation.RELU).build(), "pool3")
+                        .nIn(128).nOut(128)
+                        .padding(1, 1).activation(Activation.RELU).build(), "pool3")
 
                 // ── CNN Block 5: → pool → [B,256,2,8] ────────────────────────
                 .addLayer("conv5", new ConvolutionLayer.Builder(3, 3)
-                        .nOut(256).padding(1, 1).activation(Activation.RELU).build(), "conv4")
+                        .nIn(128).nOut(256)
+                        .padding(1, 1).activation(Activation.RELU).build(), "conv4")
                 .addLayer("pool5", new SubsamplingLayer.Builder(SubsamplingLayer.PoolingType.MAX)
                         .kernelSize(2, 2).stride(2, 2).build(), "conv5")
 
-                // ── BiLSTM (DL4J auto-inserts CnnToRnnPreProcessor here) ──────
-                // pool5 [B,256,2,8] → [B,512,8] after preprocessor
-                .addLayer("bilstm1", new Bidirectional(Bidirectional.Mode.CONCAT,
-                        new LSTM.Builder()
-                                .nOut(ModelConfig.RNN_UNITS)
-                                .activation(Activation.TANH)
-                                .build()), "pool5")
+                // ── Reshape: [B,256,2,8] → [B,512,8] ─────────────────────────
+                // C-order reshape: element [b,c,h,w] maps to [b, c*H+h, w].
+                // Each width column w becomes one time step; channels and height
+                // are flattened into the feature dimension. This is numerically
+                // equivalent to CnnToRnnPreProcessor without its DL4J 1.0.0-M2.1
+                // bug that always collapses the time dimension to 1.
+                .addVertex("reshape", new ReshapeVertex(-1, RNN_INPUT_SIZE, TIME_STEPS), "pool5")
 
-                .addLayer("bilstm2", new Bidirectional(Bidirectional.Mode.CONCAT,
-                        new LSTM.Builder()
-                                .nOut(ModelConfig.RNN_UNITS)
-                                .activation(Activation.TANH)
-                                .build()), "bilstm1")
+                // ── LSTM 1: [B,512,8] → [B,256,8] ───────────────────────────
+                .addLayer("lstm1", new LSTM.Builder()
+                        .nIn(RNN_INPUT_SIZE)
+                        .nOut(ModelConfig.RNN_UNITS)
+                        .activation(Activation.TANH)
+                        .build(), "reshape")
 
-                // ── Output: softmax over NUM_CLASSES at each time step ─────────
+                // ── LSTM 2: [B,256,8] → [B,NUM_CLASSES,8] ───────────────────
+                // nOut = NUM_CLASSES so the RnnOutputLayer input feature size
+                // matches the label feature size. DL4J 1.0.0-M2.1 validates
+                // input.size(1) == label.size(1) before applying output weights,
+                // so the final LSTM must project directly to NUM_CLASSES.
+                .addLayer("lstm2", new LSTM.Builder()
+                        .nIn(ModelConfig.RNN_UNITS)
+                        .nOut(ModelConfig.NUM_CLASSES)
+                        .activation(Activation.TANH)
+                        .build(), "lstm1")
+
+                // ── Output: [B,NUM_CLASSES,8] → softmax + MCXENT loss ─────────
                 .addLayer("output", new RnnOutputLayer.Builder(LossFunctions.LossFunction.MCXENT)
+                        .nIn(ModelConfig.NUM_CLASSES)
                         .nOut(ModelConfig.NUM_CLASSES)
                         .activation(Activation.SOFTMAX)
-                        .build(), "bilstm2")
+                        .build(), "lstm2")
 
                 .setOutputs("output")
-                // Tell DL4J the input type so it can infer nIn and insert preprocessors
-                .setInputTypes(InputType.convolutional(
-                        ModelConfig.IMG_HEIGHT, ModelConfig.IMG_WIDTH, ModelConfig.IMG_CHANNELS))
                 .build();
 
         return new ComputationGraph(conf);

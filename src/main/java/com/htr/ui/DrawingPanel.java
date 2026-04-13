@@ -22,7 +22,10 @@ public class DrawingPanel extends JPanel {
 
     public DrawingPanel() {
         setBackground(BG_COLOR);
-        setPreferredSize(new Dimension(600, 120));
+        // 480×120 = 4:1 aspect ratio, matching training images (128×32 = 4:1).
+        // The preprocessor scales height to 32 (scale=32/120=0.267),
+        // giving width=480*0.267=128 — exactly MODEL_WIDTH with no cropping.
+        setPreferredSize(new Dimension(480, 120));
         setBorder(BorderFactory.createLineBorder(Color.GRAY, 1));
 
         initCanvas();
@@ -60,7 +63,7 @@ public class DrawingPanel extends JPanel {
     // ── Internals ─────────────────────────────────────────────────────────────
 
     private void initCanvas() {
-        int w = Math.max(getWidth(),  600);
+        int w = Math.max(getWidth(),  480);
         int h = Math.max(getHeight(), 120);
         canvas  = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
         canvasG = canvas.createGraphics();

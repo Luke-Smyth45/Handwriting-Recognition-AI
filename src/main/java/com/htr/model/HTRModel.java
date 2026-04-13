@@ -1,6 +1,5 @@
 package com.htr.model;
 
-import com.htr.data.ImagePreprocessor;
 import org.deeplearning4j.nn.graph.ComputationGraph;
 import org.deeplearning4j.util.ModelSerializer;
 import org.nd4j.linalg.api.ndarray.INDArray;
@@ -23,11 +22,6 @@ public class HTRModel implements AutoCloseable {
 
     // ── Load ──────────────────────────────────────────────────────────────────
 
-    /**
-     * Load a trained model from a DL4J zip file.
-     *
-     * @param modelPath path to the .zip file (e.g. "models/htr_model.zip")
-     */
     public void load(String modelPath) throws IOException {
         File file = new File(modelPath);
         if (!file.exists()) {
@@ -42,12 +36,6 @@ public class HTRModel implements AutoCloseable {
 
     // ── Inference ─────────────────────────────────────────────────────────────
 
-    /**
-     * Run inference on a single preprocessed image.
-     *
-     * @param imageData float[HEIGHT][WIDTH] normalised + inverted pixel values
-     * @return decoded text string
-     */
     public String predict(float[][] imageData) {
         if (model == null) {
             throw new IllegalStateException("Model not loaded. Call load() first.");
@@ -71,7 +59,6 @@ public class HTRModel implements AutoCloseable {
         int timeSteps  = (int) logits.shape()[2];
         int numClasses = (int) logits.shape()[1];
 
-        // Convert to float[timeSteps][numClasses] for the CTC decoder
         float[][] logitMatrix = new float[timeSteps][numClasses];
         for (int t = 0; t < timeSteps; t++) {
             for (int c = 0; c < numClasses; c++) {
@@ -83,7 +70,5 @@ public class HTRModel implements AutoCloseable {
     }
 
     @Override
-    public void close() {
-        // ComputationGraph does not hold native resources that need explicit release
-    }
+    public void close() {}
 }
