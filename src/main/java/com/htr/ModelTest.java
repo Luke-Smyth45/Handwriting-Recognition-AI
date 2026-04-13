@@ -94,13 +94,12 @@ public class ModelTest {
                         for (int x = 0; x < ModelConfig.IMG_WIDTH; x++)
                             features.putScalar(new int[]{b, 0, y, x}, img[y][x]);
 
+                    // CTC packed format: length at [b,0,0], char indices at [b,i+1,0]
                     int[] encoded = charsetEncoder.encode(batch.get(b).getTranscription());
-                    for (int t = 0; t < T; t++) {
-                        int ci = encoded.length > 0
-                                ? Math.min((int) ((long) t * encoded.length / T), encoded.length - 1)
-                                : 0;
-                        int cls = encoded.length > 0 ? encoded[ci] : ModelConfig.BLANK_INDEX;
-                        labels.putScalar(new int[]{b, cls, t}, 1.0f);
+                    int L = Math.min(encoded.length, T - 1);
+                    labels.putScalar(new int[]{b, 0, 0}, (float) L);
+                    for (int i = 0; i < L; i++) {
+                        labels.putScalar(new int[]{b, i + 1, 0}, (float) encoded[i]);
                     }
                 }
 

@@ -12,7 +12,7 @@ import org.deeplearning4j.nn.graph.ComputationGraph;
 import org.deeplearning4j.nn.weights.WeightInit;
 import org.nd4j.linalg.activations.Activation;
 import org.nd4j.linalg.learning.config.Adam;
-import org.nd4j.linalg.lossfunctions.LossFunctions;
+import com.htr.model.CTCLossFunction;
 
 /**
  * Builds the CNN + LSTM model as a ComputationGraph.
@@ -120,11 +120,11 @@ public class ModelGraph {
                         .activation(Activation.TANH)
                         .build(), "lstm1")
 
-                // ── Output: [B,NUM_CLASSES,8] → softmax + MCXENT loss ─────────
-                .addLayer("output", new RnnOutputLayer.Builder(LossFunctions.LossFunction.MCXENT)
+                // ── Output: [B,NUM_CLASSES,8] → CTC loss (softmax inside CTCLossFunction) ──
+                .addLayer("output", new RnnOutputLayer.Builder(new CTCLossFunction())
                         .nIn(ModelConfig.NUM_CLASSES)
                         .nOut(ModelConfig.NUM_CLASSES)
-                        .activation(Activation.SOFTMAX)
+                        .activation(Activation.IDENTITY)  // softmax applied inside CTCLossFunction
                         .build(), "lstm2")
 
                 .setOutputs("output")

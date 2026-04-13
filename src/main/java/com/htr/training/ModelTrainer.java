@@ -173,13 +173,17 @@ public class ModelTrainer {
                          NDArrayIndex.all(), NDArrayIndex.all())
                     .assign(Nd4j.create(flat, new int[]{ModelConfig.IMG_HEIGHT, ModelConfig.IMG_WIDTH}));
 
+            // CTC label packing: length at [b,0,0], char indices at [b,i+1,0].
+            // Max label length = TIME_STEPS - 1 (col 0 reserved for the length value).
             int[] encoded = charsetEncoder.encode(sample.getTranscription());
-            for (int t = 0; t < TIME_STEPS; t++) {
-                int charIdx  = encoded.length > 0
-                        ? Math.min((int) ((long) t * encoded.length / TIME_STEPS), encoded.length - 1)
-                        : 0;
-                int classIdx = encoded.length > 0 ? encoded[charIdx] : ModelConfig.BLANK_INDEX;
-                labels.putScalar(new int[]{b, classIdx, t}, 1.0f);
+            int L = Math.min(encoded.length, TIME_STEPS - 1);
+            if (L < encoded.length) {
+                log.warn("Truncating '{}' ({} chars) to {} for CTC (TIME_STEPS={})",
+                        sample.getTranscription(), encoded.length, L, TIME_STEPS);
+            }
+            labels.putScalar(new int[]{b, 0, 0}, (float) L);
+            for (int i = 0; i < L; i++) {
+                labels.putScalar(new int[]{b, i + 1, 0}, (float) encoded[i]);
             }
         }
 
@@ -205,8 +209,10 @@ public class ModelTrainer {
                 ComputationGraph model = ModelSerializer.restoreComputationGraph(saveFile, true);
                 log.info("Loaded model with {} parameters", model.numParams());
                 return model;
-            } catch (IOException e) {
-                log.warn("Could not load existing model ({}), starting fresh", e.getMessage());
+            } catch (Exception e) {
+                log.warn("Could not load existing model ({}). " +
+                         "If you changed the loss function, delete {} and retrain from scratch.",
+                         e.getMessage(), ModelConfig.MODEL_SAVE_DIR);
             }
         }
         log.info("No saved model found — initialising new model");
