@@ -18,12 +18,17 @@ import java.util.Arrays;
  * softmax internally and returns the combined CTC+Softmax gradient
  * (grad[t][c] = softmax[t][c] - gamma[t][c]).
  *
- * Label packing (labels tensor [B, NUM_CLASSES, T] → reshaped to [B*T, NUM_CLASSES]):
- *   labels2d[b*T + 0, 0]   = label length L  (float-cast int)
- *   labels2d[b*T + 0, i+1] = charIdx[i]      (for i = 0..L-1)
- *   all other cells        = 0.0
+ * DL4J's reshape3dTo2d applies permute([0,2,1]) then F-order reshape,
+ * mapping labels3d[b, c, t] → labels2d[b + B*t, c].
  *
- * Maximum label length = T - 1 = 7  (ModelTrainer enforces this).
+ * Label packing in labels3d[B, NUM_CLASSES, T] (set by ModelTrainer):
+ *   labels3d[b, 0,   0] = L           → labels2d[b, 0]
+ *   labels3d[b, i+1, 0] = charIdx[i]  → labels2d[b, i+1]
+ *   all other cells = 0.0
+ *
+ * So in labels2d we read the label for sample b from row b (NOT b*T).
+ * Similarly, preOutput2d[b + B*t, c] = preOutput3d[b, c, t], so
+ * gradients for sample b at time t go to row b + B*t.
  *
  * Serialization: ILossFunction carries @JsonTypeInfo(use=Id.CLASS), so Jackson
  * writes the fully-qualified class name and reconstructs via zero-arg constructor.
@@ -49,10 +54,10 @@ public class CTCLossFunction implements ILossFunction {
         double totalLoss = 0.0;
         int    counted   = 0;
         for (int b = 0; b < B; b++) {
-            int[] labelSeq = extractLabel(labels, b, T);
+            int[] labelSeq = extractLabel(labels, b);
             if (labelSeq.length == 0 || labelSeq.length > T) continue;
 
-            double[][] logProbs = sliceLogProbs(lsm, b, T, C);
+            double[][] logProbs = sliceLogProbs(lsm, b, B, T, C);
             double     logP     = ctcForwardOnly(logProbs, labelSeq);
 
             if (!Double.isInfinite(logP)) {
@@ -75,10 +80,10 @@ public class CTCLossFunction implements ILossFunction {
         INDArray   scores = Nd4j.zeros(totalRows, 1);
 
         for (int b = 0; b < B; b++) {
-            int[] labelSeq = extractLabel(labels, b, T);
+            int[] labelSeq = extractLabel(labels, b);
             if (labelSeq.length == 0 || labelSeq.length > T) continue;
 
-            double[][] logProbs = sliceLogProbs(lsm, b, T, C);
+            double[][] logProbs = sliceLogProbs(lsm, b, B, T, C);
             double     logP     = ctcForwardOnly(logProbs, labelSeq);
             double     loss     = Double.isInfinite(logP) ? 0.0 : -logP;
 
@@ -86,7 +91,7 @@ public class CTCLossFunction implements ILossFunction {
             // time-axis reduction yields the correct per-sample total.
             float perRow = (float) (loss / T);
             for (int t = 0; t < T; t++) {
-                scores.putScalar(b * T + t, 0, perRow);
+                scores.putScalar(b + B * t, 0, perRow);
             }
         }
         return scores;
@@ -104,30 +109,30 @@ public class CTCLossFunction implements ILossFunction {
         INDArray   grad = Nd4j.zeros(totalRows, C);
 
         for (int b = 0; b < B; b++) {
-            int[] labelSeq = extractLabel(labels, b, T);
+            int[] labelSeq = extractLabel(labels, b);
             if (labelSeq.length == 0 || labelSeq.length > T) continue;
 
-            double[][] logProbs = sliceLogProbs(lsm, b, T, C);
+            double[][] logProbs = sliceLogProbs(lsm, b, B, T, C);
             double[][] gamma    = new double[T][C];
 
             double logP = ctcForwardBackward(logProbs, labelSeq, gamma);
             if (Double.isInfinite(logP)) {
-                log.debug("CTC: degenerate alignment for sample {} (label len {}), skipping gradient", b, labelSeq.length);
+                log.debug("CTC: degenerate alignment for sample {} (label len {}), skipping gradient",
+                        b, labelSeq.length);
                 continue;
             }
 
             // Combined CTC + Softmax gradient: softmax[t][c] - gamma[t][c]
+            // Gradient for sample b at time t goes to row b + B*t.
             for (int t = 0; t < T; t++) {
                 for (int c = 0; c < C; c++) {
                     double softmax = Math.exp(logProbs[t][c]);
-                    grad.putScalar(new int[]{b * T + t, c}, (float) (softmax - gamma[t][c]));
+                    grad.putScalar(new int[]{b + B * t, c}, (float) (softmax - gamma[t][c]));
                 }
             }
         }
 
-        // Activation.IDENTITY backprop is a no-op, so we return grad directly.
-        // Calling activationFn.backprop is intentionally skipped to avoid the
-        // IDENTITY wrapper adding any wrapper overhead.
+        // Activation.IDENTITY backprop is a no-op — return grad directly.
         return grad;
     }
 
@@ -146,15 +151,16 @@ public class CTCLossFunction implements ILossFunction {
         int    counted   = 0;
 
         for (int b = 0; b < B; b++) {
-            int[] labelSeq = extractLabel(labels, b, T);
+            int[] labelSeq = extractLabel(labels, b);
             if (labelSeq.length == 0 || labelSeq.length > T) continue;
 
-            double[][] logProbs = sliceLogProbs(lsm, b, T, C);
+            double[][] logProbs = sliceLogProbs(lsm, b, B, T, C);
             double[][] gamma    = new double[T][C];
 
             double logP = ctcForwardBackward(logProbs, labelSeq, gamma);
             if (Double.isInfinite(logP)) {
-                log.debug("CTC: degenerate alignment for sample {} (label len {}), skipping", b, labelSeq.length);
+                log.debug("CTC: degenerate alignment for sample {} (label len {}), skipping",
+                        b, labelSeq.length);
                 continue;
             }
 
@@ -164,7 +170,7 @@ public class CTCLossFunction implements ILossFunction {
             for (int t = 0; t < T; t++) {
                 for (int c = 0; c < C; c++) {
                     double softmax = Math.exp(logProbs[t][c]);
-                    grad.putScalar(new int[]{b * T + t, c}, (float) (softmax - gamma[t][c]));
+                    grad.putScalar(new int[]{b + B * t, c}, (float) (softmax - gamma[t][c]));
                 }
             }
         }
@@ -185,7 +191,7 @@ public class CTCLossFunction implements ILossFunction {
      *
      * @param logProbs  [T][C] log-softmax probabilities
      * @param labelSeq  character index sequence, length L
-     * @return log probability of the label sequence; Double.NEGATIVE_INFINITY if
+     * @return log probability of the label sequence; NEGATIVE_INFINITY if
      *         the label cannot be aligned (L > T)
      */
     private double ctcForwardOnly(double[][] logProbs, int[] labelSeq) {
@@ -221,7 +227,7 @@ public class CTCLossFunction implements ILossFunction {
      * @param logProbs  [T][C] log-softmax probabilities
      * @param labelSeq  character index sequence, length L
      * @param gamma     output array [T][C] filled with CTC posteriors
-     * @return log P(label | logProbs); Double.NEGATIVE_INFINITY on degenerate input
+     * @return log P(label | logProbs); NEGATIVE_INFINITY on degenerate input
      */
     private double ctcForwardBackward(double[][] logProbs, int[] labelSeq, double[][] gamma) {
         int T     = logProbs.length;
@@ -323,12 +329,15 @@ public class CTCLossFunction implements ILossFunction {
     }
 
     /**
-     * Extract the [T][C] log-prob slice for batch item b from the full [B*T][C] array.
+     * Extract the [T][C] log-prob slice for batch item b.
+     *
+     * DL4J reshape: preOutput2d[b + B*t, c] = preOutput3d[b, c, t].
+     * So time step t for sample b is at row b + B*t in the 2D array.
      */
-    private static double[][] sliceLogProbs(double[][] lsm, int b, int T, int C) {
+    private static double[][] sliceLogProbs(double[][] lsm, int b, int B, int T, int C) {
         double[][] slice = new double[T][C];
         for (int t = 0; t < T; t++) {
-            slice[t] = Arrays.copyOf(lsm[b * T + t], C);
+            slice[t] = Arrays.copyOf(lsm[b + B * t], C);
         }
         return slice;
     }
@@ -336,18 +345,19 @@ public class CTCLossFunction implements ILossFunction {
     /**
      * Extract the label sequence for batch item b from the packed labels2d tensor.
      *
-     * Packing convention (see ModelTrainer):
-     *   labels2d[b*T + 0, 0]   = L  (label length)
-     *   labels2d[b*T + 0, i+1] = charIdx[i]
+     * DL4J reshape: labels3d[b, c, 0] → labels2d[b, c].
+     * Packing (set by ModelTrainer):
+     *   labels2d[b, 0]   = L           (label length)
+     *   labels2d[b, i+1] = charIdx[i]  (for i = 0..L-1)
      *
      * Returns empty array if L is 0 or invalid.
      */
-    private static int[] extractLabel(INDArray labels2d, int b, int T) {
-        int L = (int) labels2d.getFloat(b * T, 0);
+    private static int[] extractLabel(INDArray labels2d, int b) {
+        int L = (int) labels2d.getFloat(b, 0);
         if (L <= 0 || L >= (int) labels2d.shape()[1]) return new int[0];
         int[] seq = new int[L];
         for (int i = 0; i < L; i++) {
-            seq[i] = (int) labels2d.getFloat(b * T, i + 1);
+            seq[i] = (int) labels2d.getFloat(b, i + 1);
         }
         return seq;
     }

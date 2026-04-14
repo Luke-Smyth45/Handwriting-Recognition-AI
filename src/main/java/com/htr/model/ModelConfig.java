@@ -14,7 +14,8 @@ public class ModelConfig {
 
     // ── CNN ───────────────────────────────────────────────────────────────────
     // 5 blocks: filters, 3×3 kernels, pool sizes (0 = no pool)
-    // Pool schedule {2,2,2,0,2} reduces H: 32→2, W: 128→8
+    // Pool schedule {2,2,2,0,2h} reduces H: 32→2, W: 128→16
+    // pool5 uses (2,1) stride — halves height only, preserving 16 time steps
     public static final int[] CNN_FILTERS      = {32, 64, 128, 128, 256};
     public static final int[] CNN_KERNEL_SIZES = {3, 3, 3, 3, 3};
     public static final int[] POOL_SIZES       = {2, 2, 2, 0, 2};

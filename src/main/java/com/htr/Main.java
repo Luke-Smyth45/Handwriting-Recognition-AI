@@ -27,9 +27,10 @@ public class Main {
             case "--train"    -> runTraining();
             case "--validate" -> runValidation();
             case "--test"     -> ModelTest.run();
+            case "--evaluate" -> Evaluator.run();
             case "--ui"       -> runUI();
             default -> {
-                log.error("Unknown mode: '{}'. Use --train, --validate, --test, or --ui", mode);
+                log.error("Unknown mode: '{}'. Use --train, --validate, --test, --evaluate, or --ui", mode);
                 printUsage();
                 System.exit(1);
             }

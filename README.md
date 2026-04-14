@@ -68,7 +68,7 @@ java -jar target/handwriting-recognition-1.0-SNAPSHOT.jar --train
 - If `models/htr_model.zip` already exists, training **resumes from that checkpoint**
 - Logs training progress to console and to `logs/`
 
-Training runs for 50 epochs with batch size 128. On an RTX 3070 Ti this takes several hours.
+Training runs for 10 epochs with batch size 128. On an RTX 3070 Ti this takes roughly an hour.
 
 ### 5. Launch the UI
 
@@ -153,20 +153,21 @@ src/main/java/com/htr/
 Input image [B, 1, 32, 128]  (batch × channels × height × width)
          │
          ▼
-┌─────────────────────────────────────────────┐
-│  5 × CNN Blocks (Conv 3×3 + ReLU + MaxPool) │
-│                                             │
-│  Block 1: 32  filters → [B, 32,  16, 64]   │
-│  Block 2: 64  filters → [B, 64,   8, 32]   │
-│  Block 3: 128 filters → [B, 128,  4, 16]   │
-│  Block 4: 128 filters → [B, 128,  4, 16]   │  (no pool)
-│  Block 5: 256 filters → [B, 256,  2,  8]   │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  5 × CNN Blocks (Conv 3×3 + ReLU + MaxPool)              │
+│                                                          │
+│  Block 1: 32  filters, pool (2,2) → [B, 32,  16,  64]   │
+│  Block 2: 64  filters, pool (2,2) → [B, 64,   8,  32]   │
+│  Block 3: 128 filters, pool (2,2) → [B, 128,  4,  16]   │
+│  Block 4: 128 filters, no pool    → [B, 128,  4,  16]   │
+│  Block 5: 256 filters, pool (2,1) → [B, 256,  2,  16]   │
+│                        ↑ height-only pool, width kept    │
+└──────────────────────────────────────────────────────────┘
          │
          ▼
-  ReshapeVertex: [B, 256, 2, 8] → [B, 512, 8]
+  ReshapeVertex: [B, 256, 2, 16] → [B, 512, 16]
   (channels × height collapsed into features;
-   width becomes 8 time steps)
+   width becomes 16 time steps)
          │
          ▼
 ┌──────────────────────────────────────────┐
@@ -175,8 +176,8 @@ Input image [B, 1, 32, 128]  (batch × channels × height × width)
 └──────────────────────────────────────────┘
          │
          ▼
-  RnnOutputLayer (Softmax + MCXENT loss)
-  Output: [B, 80, 8]  (80 classes × 8 time steps)
+  RnnOutputLayer (Identity activation + CTC loss)
+  Output: [B, 80, 16]  (80 classes × 16 time steps)
          │
          ▼
   CTC Decoder → predicted word string
@@ -205,7 +206,7 @@ All hyperparameters are in [src/main/java/com/htr/model/ModelConfig.java](src/ma
 | `RNN_UNITS` | 256 | LSTM hidden units |
 | `NUM_CLASSES` | 80 | Characters + CTC blank |
 | `BATCH_SIZE` | 128 | Training batch size |
-| `EPOCHS` | 50 | Training epochs |
+| `EPOCHS` | 10 | Training epochs |
 | `LEARNING_RATE` | 1e-4 | Adam learning rate |
 | `BEAM_WIDTH` | 10 | CTC beam search width |
 | `DATASET_ROOT` | `data/raw/archive/iam_words` | Dataset location |
@@ -216,9 +217,9 @@ All hyperparameters are in [src/main/java/com/htr/model/ModelConfig.java](src/ma
 ## Training Details
 
 ### Loss function
-Multi-class cross-entropy (MCXENT) with "stretched" labels. Each word's characters are linearly distributed across the 8 time steps. The CTC decoder at inference time collapses repeated characters into the final word.
+True CTC (Connectionist Temporal Classification) loss, implemented in `CTCLossFunction.java`. The network outputs raw logits at each of the 16 time steps; the CTC algorithm finds the best alignment between the output sequence and the target characters automatically — no manual label stretching is needed.
 
-The raw loss value reported during training is the sum over all 8 time steps. Divide by 8 to get the per-step loss. At the start of training, random-baseline loss is ~4.38 (= ln(80)).
+The raw loss reported during training is the negative log-probability summed over all 16 time steps. At the start of training, random-baseline loss is approximately 16 × ln(80) ≈ 70. Words up to 15 characters long are handled without truncation.
 
 ### Image pre-caching
 Before the first epoch, all training and validation images are decoded and stored in RAM as flat `float[]` arrays. This eliminates per-batch disk I/O and is critical for keeping the GPU fed. On the IAM word dataset (~115,000 images at 32×128 = 4,096 floats each) this uses roughly 1.8 GB of RAM.
@@ -241,7 +242,7 @@ java -jar target/handwriting-recognition-1.0-SNAPSHOT.jar --test
 
 Three tests run:
 1. **Model build** — confirms the ComputationGraph compiles without error
-2. **Forward pass shape** — confirms output is `[2, 80, 8]` not `[2, 80, 1]` (shape `[..., 1]` would indicate a broken CNN→RNN reshape)
+2. **Forward pass shape** — confirms output is `[2, 80, 16]` not `[2, 80, 1]` (shape `[..., 1]` would indicate a broken CNN→RNN reshape)
 3. **Real training batch** — confirms one batch from the actual dataset trains without error
 
 All three must pass before running `--train`.
@@ -263,30 +264,7 @@ All three must pass before running `--train`.
 
 ## Known Limitations and Improvements
 
-### 1. Loss function — switch to true CTC loss
-
-**Current behaviour:** Training uses MCXENT (cross-entropy) with "stretched" labels — each character is manually assigned to a time step and the network is trained to predict it at that position. This is an approximation.
-
-**Why it matters:** True CTC loss lets the network figure out the best alignment between output and label on its own. It handles words of different lengths much better and is the standard approach for sequence recognition. Without it, the model struggles with words longer than about 4–5 characters because the 8 time steps must be shared across every character.
-
-**How to fix:** DL4J does not have a built-in CTC loss layer. Options:
-- Export the trained model to ONNX and use Python (PyTorch/TensorFlow) for CTC fine-tuning
-- Rewrite the training pipeline in Python with PyTorch and use `torch.nn.CTCLoss`
-- Use a DL4J custom loss layer implementing the forward/backward CTC algorithm manually
-
----
-
-### 2. Only 8 time steps
-
-**Current behaviour:** The CNN downsamples width by 16× (128 → 8), giving exactly 8 output time steps.
-
-**Why it matters:** A 6-letter word gets roughly 1.3 time steps per character. Longer words are effectively impossible to learn well. The CTC blank token and repeated-character logic have almost no room to operate.
-
-**How to fix:** Reduce the number of horizontal pooling stages in the CNN so width is downsampled by less. For example, removing the width stride from `pool3` changes 128 → 16 time steps, which is far more practical. The `RNN_INPUT_SIZE` and `TIME_STEPS` constants in `ModelGraph.java` and `ModelConfig.java` would need updating to match.
-
----
-
-### 3. Unidirectional LSTM — switch to Bidirectional
+### 1. Unidirectional LSTM — switch to Bidirectional
 
 **Current behaviour:** Both LSTM layers process the sequence left-to-right only.
 
@@ -296,7 +274,7 @@ All three must pass before running `--train`.
 
 ---
 
-### 4. Inference still uses slow putScalar loops
+### 2. Inference still uses slow putScalar loops
 
 **Current behaviour:** `HTRModel.java` builds the input tensor using nested `putScalar` calls (4,096 calls per inference). The trainer was updated to use `NDArrayIndex` slice assignment, but the inference path was not.
 
@@ -312,17 +290,17 @@ This is a single native memory copy instead of 4,096 individual Java calls. It w
 
 ---
 
-### 5. Beam search decoder is unused at inference time
+### 3. Beam search decoder is unused at inference time
 
 **Current behaviour:** `CTCDecoder` implements both greedy and beam-search decoding, but `HTRModel.predict()` calls `greedyDecode()`. Beam search (`beamSearchDecode()`) is never used.
 
-**Why it matters:** Beam search keeps multiple candidate sequences alive and picks the globally best one. For short sequences (8 time steps) the improvement is modest but measurable, especially for ambiguous characters.
+**Why it matters:** Beam search keeps multiple candidate sequences alive and picks the globally best one. For 16 time steps the improvement is measurable, especially for ambiguous characters.
 
 **How to fix:** In `HTRModel.java`, change `decoder.greedyDecode(logitMatrix)` to `decoder.beamSearchDecode(logitMatrix)`. The beam width is already configurable via `ModelConfig.BEAM_WIDTH` (currently 10).
 
 ---
 
-### 6. No data augmentation
+### 4. No data augmentation
 
 **Current behaviour:** Training images are used as-is after resize, pad, and normalise. Every epoch sees identical data.
 
@@ -336,7 +314,7 @@ This is a single native memory copy instead of 4,096 individual Java calls. It w
 
 ---
 
-### 7. No test set evaluation
+### 5. No test set evaluation
 
 **Current behaviour:** Training reports `train_loss` and `val_loss` each epoch but never evaluates on the held-out test split. The test set (~2,915 samples) is loaded but unused.
 
@@ -344,7 +322,7 @@ This is a single native memory copy instead of 4,096 individual Java calls. It w
 
 ---
 
-### 8. Single-word only
+### 6. Single-word only
 
 **Current behaviour:** The model accepts one word at a time. The drawing canvas and image loader pass a single fixed-size image to the model.
 
@@ -371,5 +349,5 @@ The saved model `.zip` is incompatible with the current architecture (e.g. after
 **Loss diverges / goes to NaN**
 LSTM gradient explosion. Delete `models/htr_model.zip` and retrain. The gradient clipping should prevent this on a fresh model.
 
-**Output shape `[B, 80, 1]` instead of `[B, 80, 8]`**
+**Output shape `[B, 80, 1]` instead of `[B, 80, 16]`**
 A DL4J 1.0.0-M2.1 bug in `CnnToRnnPreProcessor` collapses the time dimension to 1. This project uses `ReshapeVertex` as a workaround. Run `--test` to confirm the fix is active. Do **not** add `.setInputTypes()` to `ModelGraph.java` — it silently overrides the ReshapeVertex.

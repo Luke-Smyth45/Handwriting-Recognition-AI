@@ -178,7 +178,7 @@ public class ModelTrainer {
             int[] encoded = charsetEncoder.encode(sample.getTranscription());
             int L = Math.min(encoded.length, TIME_STEPS - 1);
             if (L < encoded.length) {
-                log.warn("Truncating '{}' ({} chars) to {} for CTC (TIME_STEPS={})",
+                log.debug("Truncating '{}' ({} chars) to {} for CTC (TIME_STEPS={})",
                         sample.getTranscription(), encoded.length, L, TIME_STEPS);
             }
             labels.putScalar(new int[]{b, 0, 0}, (float) L);

@@ -19,11 +19,11 @@ import com.htr.model.CTCLossFunction;
  *
  * Architecture:
  *   Input  [B, 1, 32, 128]    (NCHW)
- *   → 5 CNN blocks             → [B, 256, 2, 8]
- *   → ReshapeVertex (C-order)  → [B, 512, 8]   channels×height collapsed into features,
+ *   → 5 CNN blocks             → [B, 256, 2, 16]
+ *   → ReshapeVertex (C-order)  → [B, 512, 16]  channels×height collapsed into features,
  *                                               width preserved as time steps
- *   → LSTM × 2                 → [B, 256, 8]
- *   → Softmax output           → [B, NUM_CLASSES, 8]
+ *   → LSTM × 2                 → [B, 256, 16]
+ *   → CTC output               → [B, NUM_CLASSES, 16]
  *
  * ReshapeVertex is a primitive Nd4j reshape — no semantic preprocessing logic.
  * A C-order reshape of [B, C, H, W] → [B, C*H, W] correctly maps each CNN
@@ -36,10 +36,10 @@ import com.htr.model.CTCLossFunction;
  */
 public class ModelGraph {
 
-    /** Width columns kept as time steps after 4× stride-2 pool (128 / 16 = 8). */
-    public static final int TIME_STEPS = ModelConfig.IMG_WIDTH / 16; // 8
+    /** Width columns kept as time steps: 3× width-halving pools (128 / 8 = 16). */
+    public static final int TIME_STEPS = ModelConfig.IMG_WIDTH / 8; // 16
 
-    // CNN output after pool5: [B, 256, 2, 8]
+    // CNN output after pool5: [B, 256, 2, 16]
     private static final int CNN_OUT_HEIGHT   = ModelConfig.IMG_HEIGHT / 16; // 2
     private static final int CNN_OUT_CHANNELS = ModelConfig.CNN_FILTERS[4];  // 256
 
@@ -87,14 +87,17 @@ public class ModelGraph {
                         .nIn(128).nOut(128)
                         .padding(1, 1).activation(Activation.RELU).build(), "pool3")
 
-                // ── CNN Block 5: → pool → [B,256,2,8] ────────────────────────
+                // ── CNN Block 5: → pool (height only) → [B,256,2,16] ────────
+                // kernelSize/stride (2,1): halves height, preserves width.
+                // Keeps 16 width columns as time steps instead of 8, allowing
+                // CTC to align words up to 15 characters without truncation.
                 .addLayer("conv5", new ConvolutionLayer.Builder(3, 3)
                         .nIn(128).nOut(256)
                         .padding(1, 1).activation(Activation.RELU).build(), "conv4")
                 .addLayer("pool5", new SubsamplingLayer.Builder(SubsamplingLayer.PoolingType.MAX)
-                        .kernelSize(2, 2).stride(2, 2).build(), "conv5")
+                        .kernelSize(2, 1).stride(2, 1).build(), "conv5")
 
-                // ── Reshape: [B,256,2,8] → [B,512,8] ─────────────────────────
+                // ── Reshape: [B,256,2,16] → [B,512,16] ───────────────────────
                 // C-order reshape: element [b,c,h,w] maps to [b, c*H+h, w].
                 // Each width column w becomes one time step; channels and height
                 // are flattened into the feature dimension. This is numerically
@@ -102,14 +105,14 @@ public class ModelGraph {
                 // bug that always collapses the time dimension to 1.
                 .addVertex("reshape", new ReshapeVertex(-1, RNN_INPUT_SIZE, TIME_STEPS), "pool5")
 
-                // ── LSTM 1: [B,512,8] → [B,256,8] ───────────────────────────
+                // ── LSTM 1: [B,512,16] → [B,256,16] ─────────────────────────
                 .addLayer("lstm1", new LSTM.Builder()
                         .nIn(RNN_INPUT_SIZE)
                         .nOut(ModelConfig.RNN_UNITS)
                         .activation(Activation.TANH)
                         .build(), "reshape")
 
-                // ── LSTM 2: [B,256,8] → [B,NUM_CLASSES,8] ───────────────────
+                // ── LSTM 2: [B,256,16] → [B,NUM_CLASSES,16] ─────────────────
                 // nOut = NUM_CLASSES so the RnnOutputLayer input feature size
                 // matches the label feature size. DL4J 1.0.0-M2.1 validates
                 // input.size(1) == label.size(1) before applying output weights,
