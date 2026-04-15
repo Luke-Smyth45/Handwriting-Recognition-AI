@@ -33,7 +33,7 @@ public class ModelConfig {
 
     // ── Training ──────────────────────────────────────────────────────────────
     public static final int    BATCH_SIZE    = 128;
-    public static final int    EPOCHS        = 100;
+    public static final int    EPOCHS        = 200;
     public static final double LEARNING_RATE = 1e-4;
 
     // ── CTC Decoding ──────────────────────────────────────────────────────────

@@ -61,8 +61,8 @@ class IAMDataLoaderTest {
 
         DatasetSplit split = loader.splitRandom(samples, 42L);
         assertEquals(1000, split.totalSize());
-        assertEquals(800,  split.getTrainSamples().size());
+        assertEquals(900,  split.getTrainSamples().size());
         assertEquals(100,  split.getValSamples().size());
-        assertEquals(100,  split.getTestSamples().size());
+        assertEquals(0,    split.getTestSamples().size());
     }
 }

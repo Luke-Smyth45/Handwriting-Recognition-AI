@@ -61,19 +61,20 @@ public class IAMDataLoader {
      * If you have the official split files (trainset.txt, validationset1.txt, etc.)
      * place them in datasetRoot and use {@link #loadSplitFromFiles} instead.
      *
-     * This fallback uses an 80 / 10 / 10 random split.
+     * This fallback uses a 90 / 10 / 0 random split — the former test split
+     * is folded into training to maximise the data the model learns from.
+     * Use --evaluate on the validation split to measure accuracy.
      */
     public DatasetSplit splitRandom(List<IAMSample> samples, long seed) {
         List<IAMSample> shuffled = new ArrayList<>(samples);
         Collections.shuffle(shuffled, new Random(seed));
 
         int total    = shuffled.size();
-        int trainEnd = (int) (total * 0.80);
-        int valEnd   = (int) (total * 0.90);
+        int trainEnd = (int) (total * 0.90);
 
         List<IAMSample> train = shuffled.subList(0, trainEnd);
-        List<IAMSample> val   = shuffled.subList(trainEnd, valEnd);
-        List<IAMSample> test  = shuffled.subList(valEnd, total);
+        List<IAMSample> val   = shuffled.subList(trainEnd, total);
+        List<IAMSample> test  = new ArrayList<>();
 
         DatasetSplit split = new DatasetSplit(
                 new ArrayList<>(train),
