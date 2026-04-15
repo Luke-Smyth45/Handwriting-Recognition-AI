@@ -66,7 +66,7 @@ public class HTRModel implements AutoCloseable {
             }
         }
 
-        return decoder.greedyDecode(logitMatrix);
+        return decoder.beamSearchDecode(logitMatrix);
     }
 
     @Override

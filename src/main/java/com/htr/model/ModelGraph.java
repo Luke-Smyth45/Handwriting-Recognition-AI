@@ -4,6 +4,7 @@ import org.deeplearning4j.nn.conf.ComputationGraphConfiguration;
 import org.deeplearning4j.nn.conf.GradientNormalization;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
 import org.deeplearning4j.nn.conf.graph.ReshapeVertex;
+import org.deeplearning4j.nn.conf.layers.BatchNormalization;
 import org.deeplearning4j.nn.conf.layers.ConvolutionLayer;
 import org.deeplearning4j.nn.conf.layers.RnnOutputLayer;
 import org.deeplearning4j.nn.conf.layers.SubsamplingLayer;
@@ -61,41 +62,43 @@ public class ModelGraph {
                 .graphBuilder()
                 .addInputs("input")
 
-                // ── CNN Block 1: [B,1,32,128] → pool → [B,32,16,64] ──────────
+                // ── CNN Block 1: [B,1,32,128] → bn → pool → [B,32,16,64] ─────
                 .addLayer("conv1", new ConvolutionLayer.Builder(3, 3)
                         .nIn(ModelConfig.IMG_CHANNELS).nOut(32)
                         .padding(1, 1).activation(Activation.RELU).build(), "input")
+                .addLayer("bn1", new BatchNormalization.Builder().nIn(32).nOut(32).build(), "conv1")
                 .addLayer("pool1", new SubsamplingLayer.Builder(SubsamplingLayer.PoolingType.MAX)
-                        .kernelSize(2, 2).stride(2, 2).build(), "conv1")
+                        .kernelSize(2, 2).stride(2, 2).build(), "bn1")
 
-                // ── CNN Block 2: → pool → [B,64,8,32] ────────────────────────
+                // ── CNN Block 2: → bn → pool → [B,64,8,32] ───────────────────
                 .addLayer("conv2", new ConvolutionLayer.Builder(3, 3)
                         .nIn(32).nOut(64)
                         .padding(1, 1).activation(Activation.RELU).build(), "pool1")
+                .addLayer("bn2", new BatchNormalization.Builder().nIn(64).nOut(64).build(), "conv2")
                 .addLayer("pool2", new SubsamplingLayer.Builder(SubsamplingLayer.PoolingType.MAX)
-                        .kernelSize(2, 2).stride(2, 2).build(), "conv2")
+                        .kernelSize(2, 2).stride(2, 2).build(), "bn2")
 
-                // ── CNN Block 3: → pool → [B,128,4,16] ───────────────────────
+                // ── CNN Block 3: → bn → pool → [B,128,4,16] ──────────────────
                 .addLayer("conv3", new ConvolutionLayer.Builder(3, 3)
                         .nIn(64).nOut(128)
                         .padding(1, 1).activation(Activation.RELU).build(), "pool2")
+                .addLayer("bn3", new BatchNormalization.Builder().nIn(128).nOut(128).build(), "conv3")
                 .addLayer("pool3", new SubsamplingLayer.Builder(SubsamplingLayer.PoolingType.MAX)
-                        .kernelSize(2, 2).stride(2, 2).build(), "conv3")
+                        .kernelSize(2, 2).stride(2, 2).build(), "bn3")
 
-                // ── CNN Block 4: no pool → [B,128,4,16] ──────────────────────
+                // ── CNN Block 4: → bn → no pool → [B,128,4,16] ───────────────
                 .addLayer("conv4", new ConvolutionLayer.Builder(3, 3)
                         .nIn(128).nOut(128)
                         .padding(1, 1).activation(Activation.RELU).build(), "pool3")
+                .addLayer("bn4", new BatchNormalization.Builder().nIn(128).nOut(128).build(), "conv4")
 
-                // ── CNN Block 5: → pool (height only) → [B,256,2,16] ────────
-                // kernelSize/stride (2,1): halves height, preserves width.
-                // Keeps 16 width columns as time steps instead of 8, allowing
-                // CTC to align words up to 15 characters without truncation.
+                // ── CNN Block 5: → bn → pool (height only) → [B,256,2,16] ───
                 .addLayer("conv5", new ConvolutionLayer.Builder(3, 3)
                         .nIn(128).nOut(256)
-                        .padding(1, 1).activation(Activation.RELU).build(), "conv4")
+                        .padding(1, 1).activation(Activation.RELU).build(), "bn4")
+                .addLayer("bn5", new BatchNormalization.Builder().nIn(256).nOut(256).build(), "conv5")
                 .addLayer("pool5", new SubsamplingLayer.Builder(SubsamplingLayer.PoolingType.MAX)
-                        .kernelSize(2, 1).stride(2, 1).build(), "conv5")
+                        .kernelSize(2, 1).stride(2, 1).build(), "bn5")
 
                 // ── Reshape: [B,256,2,16] → [B,512,16] ───────────────────────
                 // C-order reshape: element [b,c,h,w] maps to [b, c*H+h, w].
@@ -110,6 +113,7 @@ public class ModelGraph {
                         .nIn(RNN_INPUT_SIZE)
                         .nOut(ModelConfig.RNN_UNITS)
                         .activation(Activation.TANH)
+                        .dropOut(0.5)
                         .build(), "reshape")
 
                 // ── LSTM 2: [B,256,16] → [B,NUM_CLASSES,16] ─────────────────

@@ -8,6 +8,8 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import java.util.Random;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Preprocesses raw IAM images into normalised float tensors ready for the CNN.
@@ -145,11 +147,121 @@ public class ImagePreprocessor {
         return tensor;
     }
 
+    // ── Augmentation ──────────────────────────────────────────────────────────
+
+    private static final ThreadLocal<Random> THREAD_RANDOM = ThreadLocal.withInitial(Random::new);
+
+    /**
+     * Apply random augmentation to a preprocessed float[H][W] image.
+     * Only called during training — never during inference.
+     *
+     * Transforms applied:
+     *   - Random rotation        ±7°
+     *   - Random width stretch   [0.85, 1.15]
+     *   - Random brightness      [0.75, 1.25]
+     *   - Gaussian noise         σ = 0.03
+     */
+    public static float[][] augment(float[][] img) {
+        ThreadLocalRandom rng = ThreadLocalRandom.current();
+
+        // Random rotation ±7°
+        img = rotate(img, Math.toRadians(rng.nextDouble(-7.0, 7.0)));
+
+        // Random width stretch 0.85–1.15
+        img = stretchWidth(img, rng.nextDouble(0.85, 1.15));
+
+        // Random brightness jitter ±25%
+        float brightScale = (float) rng.nextDouble(0.75, 1.25);
+        int H = img.length, W = img[0].length;
+        for (int r = 0; r < H; r++)
+            for (int c = 0; c < W; c++)
+                img[r][c] = Math.min(1f, img[r][c] * brightScale);
+
+        // Gaussian noise σ=0.03
+        Random rand = THREAD_RANDOM.get();
+        for (int r = 0; r < H; r++)
+            for (int c = 0; c < W; c++)
+                img[r][c] = Math.min(1f, Math.max(0f,
+                        img[r][c] + (float) (rand.nextGaussian() * 0.03)));
+
+        return img;
+    }
+
+    private static float[][] stretchWidth(float[][] src, double factor) {
+        int H = src.length, W = src[0].length;
+        int newW = Math.max(1, (int) Math.round(W * factor));
+        float[][] stretched = new float[H][newW];
+        for (int r = 0; r < H; r++)
+            for (int c = 0; c < newW; c++) {
+                double srcX = c / factor;
+                int x0 = (int) Math.floor(srcX);
+                double wx = srcX - x0;
+                stretched[r][c] = (float) ((1 - wx) * pixel(src, r, x0,     H, W)
+                                         +      wx  * pixel(src, r, x0 + 1, H, W));
+            }
+        // Centre the stretched image in the original W, padding/cropping as needed
+        float[][] result = new float[H][W];
+        if (newW >= W) {
+            int offset = (newW - W) / 2;
+            for (int r = 0; r < H; r++)
+                for (int c = 0; c < W; c++)
+                    result[r][c] = stretched[r][Math.min(offset + c, newW - 1)];
+        } else {
+            int offset = (W - newW) / 2;
+            for (int r = 0; r < H; r++)
+                for (int c = 0; c < newW; c++)
+                    result[r][offset + c] = stretched[r][c];
+        }
+        return result;
+    }
+
+    private static float[][] rotate(float[][] src, double angle) {
+        int H = src.length, W = src[0].length;
+        float cx = (W - 1) / 2f, cy = (H - 1) / 2f;
+        // Inverse rotation: map destination pixel back to source
+        double cos = Math.cos(-angle), sin = Math.sin(-angle);
+        float[][] dst = new float[H][W];
+        for (int r = 0; r < H; r++) {
+            for (int c = 0; c < W; c++) {
+                double dx = c - cx, dy = r - cy;
+                double srcX = cos * dx - sin * dy + cx;
+                double srcY = sin * dx + cos * dy + cy;
+                dst[r][c] = bilinear(src, srcX, srcY, H, W);
+            }
+        }
+        return dst;
+    }
+
+    private static float bilinear(float[][] img, double x, double y, int H, int W) {
+        int x0 = (int) Math.floor(x), y0 = (int) Math.floor(y);
+        double wx = x - x0, wy = y - y0;
+        return (float) (
+            (1 - wy) * ((1 - wx) * pixel(img, y0,     x0,     H, W)
+                      +      wx  * pixel(img, y0,     x0 + 1, H, W)) +
+                 wy  * ((1 - wx) * pixel(img, y0 + 1, x0,     H, W)
+                      +      wx  * pixel(img, y0 + 1, x0 + 1, H, W))
+        );
+    }
+
+    private static float pixel(float[][] img, int r, int c, int H, int W) {
+        if (r < 0 || r >= H || c < 0 || c >= W) return 0f;
+        return img[r][c];
+    }
+
     // ── Utility ───────────────────────────────────────────────────────────────
 
     /**
+     * Reshape a flat float[] (row-major) back to float[H][W].
+     */
+    public static float[][] unflatten(float[] flat, int H, int W) {
+        float[][] img = new float[H][W];
+        for (int r = 0; r < H; r++)
+            System.arraycopy(flat, r * W, img[r], 0, W);
+        return img;
+    }
+
+    /**
      * Flatten a 2-D float tensor to a 1-D array (row-major order).
-     * Useful for feeding into TensorFlow as a flat buffer.
      */
     public static float[] flatten(float[][] tensor) {
         int h = tensor.length;

@@ -33,11 +33,11 @@ public class ModelConfig {
 
     // ── Training ──────────────────────────────────────────────────────────────
     public static final int    BATCH_SIZE    = 128;
-    public static final int    EPOCHS        = 50;
+    public static final int    EPOCHS        = 100;
     public static final double LEARNING_RATE = 1e-4;
 
     // ── CTC Decoding ──────────────────────────────────────────────────────────
-    public static final int BEAM_WIDTH = 10;
+    public static final int BEAM_WIDTH = 20;
 
     // ── Paths ─────────────────────────────────────────────────────────────────
     public static final String DATASET_ROOT   = "data/raw/archive/iam_words";

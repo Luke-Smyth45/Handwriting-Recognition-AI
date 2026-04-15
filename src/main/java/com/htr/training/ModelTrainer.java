@@ -168,6 +168,11 @@ public class ModelTrainer {
                 float[][] img = preprocessor.preprocessFromPath(sample.getImagePath());
                 flat = ImagePreprocessor.flatten(img);
             }
+            // Apply random augmentation during training (rotation ±5°, brightness jitter ±20%).
+            if (isTraining) {
+                float[][] img2d = ImagePreprocessor.unflatten(flat, ModelConfig.IMG_HEIGHT, ModelConfig.IMG_WIDTH);
+                flat = ImagePreprocessor.flatten(ImagePreprocessor.augment(img2d));
+            }
             // Assign the whole [H×W] slice in one call — much faster than putScalar loops.
             features.get(NDArrayIndex.point(b), NDArrayIndex.point(0),
                          NDArrayIndex.all(), NDArrayIndex.all())
